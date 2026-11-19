@@ -20,7 +20,7 @@ from contest.util import nearest_point
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveAStarAgent', second='DefensiveAStarAgent', num_training=0):
+                first='OffensiveMinimaxAgent', second='DefensiveAlphaBetaAgent', num_training=0):
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -298,3 +298,241 @@ class DefensiveAStarAgent(ReflexCaptureAgent):
             return path[0]
         
         return Directions.STOP
+
+##### LAB 2 ??
+ 
+class OffensiveMinimaxAgent(OffensiveAStarAgent):
+
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing)
+        self.depth = 2
+
+    def choose_action(self, game_state):
+        my_pos = nearest_point(game_state.get_agent_position(self.index))
+
+        nearby_ghosts = []
+        for i in self.get_opponents(game_state):
+            enemy = game_state.get_agent_state(i)
+            if not enemy.is_pacman and enemy.get_position() is not None and enemy.scared_timer <= 1:
+                if self.get_maze_distance(my_pos, nearest_point(enemy.get_position())) <= 3:
+                    nearby_ghosts.append(i)
+
+        if not nearby_ghosts:
+            return super().choose_action(game_state)
+
+        agents = [self.index] + nearby_ghosts
+        max_score = float('-inf')
+        move = None
+        acciones = [a for a in game_state.get_legal_actions(self.index) if a != Directions.STOP]
+        if not acciones:
+            acciones = game_state.get_legal_actions(self.index)
+
+        for a in acciones:
+            juego = game_state.generate_successor(self.index, a)
+            score = self.minimax(juego, piso=0, agent=1, agents=agents)
+
+            if score > max_score:
+                max_score = score
+                move = a
+
+        return move
+
+    def minimax(self, game_state, piso, agent, agents):
+        if game_state.is_over() or piso == self.depth:
+            return self.evaluation_function(game_state)
+
+        curr_agent = agents[agent]
+        if game_state.get_agent_state(curr_agent).get_position() is None:
+            return self.evaluation_function(game_state)
+
+        acciones = game_state.get_legal_actions(curr_agent)
+        if not acciones:
+            return self.evaluation_function(game_state)
+
+        num_agents = len(agents)
+
+        if curr_agent == self.index:    # Pacman (MAX turn)
+            final_value = float('-inf')
+            for i in acciones:
+                juego = game_state.generate_successor(curr_agent, i)
+                if agent + 1 == num_agents:
+                    value = self.minimax(juego, piso + 1, 0, agents)
+                else:
+                    value = self.minimax(juego, piso, agent + 1, agents)
+                final_value = max(final_value, value)
+        else:   # Ghosts (MIN turn)
+            final_value = float('inf')
+            for a in acciones:
+                juego = game_state.generate_successor(curr_agent, a)
+                if agent + 1 == num_agents:
+                    value = self.minimax(juego, piso + 1, 0, agents)
+                else:
+                    value = self.minimax(juego, piso, agent + 1, agents)
+                final_value = min(final_value, value)
+
+        return final_value
+
+    def evaluation_function(self, game_state):
+        my_state = game_state.get_agent_state(self.index)
+        new_pos = nearest_point(my_state.get_position())
+        new_food = self.get_food(game_state).as_list()
+
+        if new_pos == self.start:
+            return -9999
+
+        score = self.get_score(game_state) * 200 + my_state.num_carrying * 50
+
+        if my_state.num_carrying >= 3 or len(new_food) <= 2:
+            min_home = min(self.get_maze_distance(new_pos, b) for b in self.home_border)
+            score += 20.0 / (min_home + 1)
+        elif new_food:
+            min_food = min(self.get_maze_distance(new_pos, f) for f in new_food)
+            score += 10.0 / (min_food + 1)
+
+        # Panic if ghost is close
+        for i in self.get_opponents(game_state):
+            enemy = game_state.get_agent_state(i)
+            ghost_pos = enemy.get_position()
+            if ghost_pos is not None and not enemy.is_pacman and enemy.scared_timer <= 1:
+                ghost_dist = self.get_maze_distance(new_pos, nearest_point(ghost_pos))
+                if ghost_dist <= 1:
+                    return -9999
+                elif ghost_dist == 2:
+                    score -= 40
+                else:
+                    score -= 10.0 / ghost_dist
+
+        return score
+
+
+class DefensiveAlphaBetaAgent(DefensiveAStarAgent):
+
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing)
+        self.depth = 2  # 2 full rounds (piso 1 and 2) so it never exceeds the 0.1s move timer
+
+    def choose_action(self, game_state):
+        my_pos = nearest_point(game_state.get_agent_position(self.index))
+
+        # Trigger Alpha-Beta for invaders within 5 tiles, or enemies within 3 tiles at the border
+        nearby_enemies = []
+        for i in self.get_opponents(game_state):
+            enemy = game_state.get_agent_state(i)
+            if enemy.get_position() is not None:
+                dist = self.get_maze_distance(my_pos, nearest_point(enemy.get_position()))
+                if (enemy.is_pacman and dist <= 5) or dist <= 3:
+                    nearby_enemies.append(i)
+
+        if not nearby_enemies:
+            return super().choose_action(game_state)
+
+        agents = [self.index] + nearby_enemies
+        maximum = float('-inf')
+        alpha = float('-inf')
+        beta = float('inf')
+        maxmove = None
+        acciones = [a for a in game_state.get_legal_actions(self.index) if a != Directions.STOP]
+        if not acciones:
+            acciones = game_state.get_legal_actions(self.index)
+
+        for a in acciones:
+            juego = game_state.generate_successor(self.index, a)
+            value = self.min_value(juego, 1, alpha, beta, 1, agents)
+
+            if value > maximum:
+                maximum = value
+                maxmove = a
+
+            if maximum > beta:
+                return maxmove
+
+            alpha = max(alpha, maximum)
+
+        return maxmove
+
+    def max_value(self, game_state, piso, alpha, beta, agents):
+        if game_state.is_over() or piso > self.depth:
+            return self.evaluation_function(game_state)
+
+        finalvalue = float('-inf')
+        acciones = game_state.get_legal_actions(self.index)
+        if not acciones:
+            return self.evaluation_function(game_state)
+
+        for a in acciones:
+            juego = game_state.generate_successor(self.index, a)
+            value = self.min_value(juego, piso, alpha, beta, 1, agents)
+            finalvalue = max(finalvalue, value)
+
+            if finalvalue > beta:
+                return finalvalue
+
+            alpha = max(alpha, finalvalue)
+
+        return finalvalue
+
+    def min_value(self, game_state, piso, alpha, beta, fantasma, agents):
+        if game_state.is_over() or piso > self.depth:
+            return self.evaluation_function(game_state)
+
+        curr_agent = agents[fantasma]
+        if game_state.get_agent_state(curr_agent).get_position() is None:
+            return self.evaluation_function(game_state)
+
+        finalvalue = float('inf')
+        acciones = game_state.get_legal_actions(curr_agent)
+        if not acciones:
+            return self.evaluation_function(game_state)
+
+        for a in acciones:
+            juego = game_state.generate_successor(curr_agent, a)
+
+            if fantasma + 1 == len(agents):
+                value = self.max_value(juego, piso + 1, alpha, beta, agents)
+            else:
+                value = self.min_value(juego, piso, alpha, beta, fantasma + 1, agents)
+
+            finalvalue = min(finalvalue, value)
+
+            if finalvalue < alpha:
+                return finalvalue
+
+            beta = min(beta, finalvalue)
+
+        return finalvalue
+
+    def evaluation_function(self, game_state):
+        my_state = game_state.get_agent_state(self.index)
+        my_pos = nearest_point(my_state.get_position())
+
+        if my_pos in self.enemy_territory or my_state.is_pacman:
+            return -9999
+
+        score = self.get_score(game_state) * 200
+
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
+
+        score -= len(invaders) * 1000
+
+        if invaders:
+            min_invader_dist = min(
+                self.get_maze_distance(my_pos, nearest_point(e.get_position()))
+                for e in invaders
+            )
+            if my_state.scared_timer > 0:
+                score -= abs(min_invader_dist - 2) * 25
+            else:
+                score -= min_invader_dist * 15
+        else:
+            border_enemies = [e for e in enemies if e.get_position() is not None]
+            if border_enemies:
+                min_border_dist = min(
+                    self.get_maze_distance(my_pos, nearest_point(e.get_position()))
+                    for e in border_enemies
+                )
+                score -= min_border_dist * 5
+
+        return score
+
+    
