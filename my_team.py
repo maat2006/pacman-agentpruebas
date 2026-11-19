@@ -8,6 +8,7 @@
 
 import random
 import contest.util as util
+import search
 
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
@@ -19,7 +20,7 @@ from contest.util import nearest_point
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
+                first='OffensiveAStarAgent', second='DefensiveAStarAgent', num_training=0):
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -181,3 +182,119 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
 
     def get_weights(self, game_state, action):
         return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+
+
+
+
+############ EMMA NO SABE LO Q ESTA PASANDO
+
+##### LAB 1 SUPONGO YOQSE
+
+class OffensiveAStarAgent(ReflexCaptureAgent):
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        # Override to add home_border
+        width = game_state.data.layout.width
+        height = game_state.data.layout.height
+        border_x = (width // 2) - 1 if self.red else (width // 2)
+        self.home_border = [
+            (border_x, y) for y in range(height)
+            if not game_state.has_wall(border_x, y)
+        ]
+
+    def a_star_heuristic(self, state, problem):
+        if not problem.food:
+            return 0
+        return min(self.get_maze_distance(state, goal) for goal in problem.food)
+
+    def choose_action(self, game_state):
+        my_state = game_state.get_agent_state(self.index)
+        my_pos = game_state.get_agent_position(self.index)
+        food_list = self.get_food(game_state).as_list()
+
+        # find ghosts
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        ghosts = [
+            nearest_point(e.get_position()) for e in enemies
+            if not e.is_pacman and e.get_position() is not None and e.scared_timer <= 1
+        ]
+
+        if my_state.num_carrying >= 3 or len(food_list) <= 2:
+            goals = self.home_border
+        else:
+            goals = food_list
+
+        problem = search.FoodSearchProblem(game_state, my_pos, goals, ghosts)
+        path = search.a_star_search(problem, self.a_star_heuristic)
+
+        if path:
+            return path[0]
+        
+        return Directions.STOP
+
+class DefensiveAStarAgent(ReflexCaptureAgent):
+
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        width = game_state.data.layout.width
+        height = game_state.data.layout.height
+        self.mid_y = height // 2
+        border_x = (width // 2) - 1 if self.red else (width // 2)
+
+        # Block enemy territory
+        enemy_xs = range(border_x + 1, width) if self.red else range(0, border_x)
+        self.enemy_territory = {(x, y) for x in enemy_xs for y in range(height)}
+
+        # Vertical defense zone (within 3 steps of border)
+        xs = [border_x - d for d in range(4)] if self.red else [border_x + d for d in range(4)]
+        self.patrol_zone = [
+            (x, y) for x in xs for y in range(height)
+            if not game_state.has_wall(x, y)
+        ]
+        self.patrol_target = None
+
+    def a_star_heuristic(self, state, problem):
+        if not problem.food:
+            return 0
+        return min(self.get_maze_distance(state, goal) for goal in problem.food)
+
+    def choose_action(self, game_state):
+        my_pos = nearest_point(game_state.get_agent_position(self.index))
+        opponents = self.get_opponents(game_state)
+        enemies = [game_state.get_agent_state(i) for i in opponents]
+
+        # 1. If an enemy Pacman is visible, chase
+        visible = [
+            nearest_point(e.get_position()) for e in enemies
+            if e.is_pacman and e.get_position() is not None
+        ]
+        if visible:
+            self.patrol_target = None
+            goals = visible
+        else:
+            # 2. Pick a patrol point in the 3-tile zone and stick to it until reached
+            if self.patrol_target is None or my_pos == self.patrol_target:
+                dists = game_state.get_agent_distances()
+                min_dist = min(dists[i] for i in opponents)
+
+                if min_dist > 10:
+                    if my_pos[1] < self.mid_y:
+                        candidates = [p for p in self.patrol_zone if p[1] >= self.mid_y]
+                    else:
+                        candidates = [p for p in self.patrol_zone if p[1] < self.mid_y]
+                else:
+                    candidates = [p for p in self.patrol_zone if abs(p[1] - my_pos[1]) <= 3]
+
+                if not candidates:
+                    candidates = self.patrol_zone
+                self.patrol_target = min(candidates, key=lambda p: self.get_maze_distance(my_pos, p))
+
+            goals = [self.patrol_target]
+
+        problem = search.FoodSearchProblem(game_state, my_pos, goals, blocked=self.enemy_territory)
+        path = search.a_star_search(problem, self.a_star_heuristic)
+
+        if path:
+            return path[0]
+        
+        return Directions.STOP
