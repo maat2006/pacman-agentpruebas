@@ -9,6 +9,8 @@
 import random
 import contest.util as util
 import search
+import os
+import pickle
 
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
@@ -535,4 +537,262 @@ class DefensiveAlphaBetaAgent(DefensiveAStarAgent):
 
         return score
 
-    
+
+##### LAB 3 SUPONGO
+
+class AbstractState(tuple):
+    def __hash__(self):
+        return hash(self[0])
+
+    def __eq__(self, other):
+        if isinstance(other, AbstractState):
+            return self[0] == other[0]
+        return super().__eq__(other)
+
+
+class OffensiveQLearningAgent(CaptureAgent):
+
+    def __init__(self, index, time_for_computing=.1, epsilon=0.25, gamma=0.85, alpha=0.25, num_training=0):
+        super().__init__(index, time_for_computing)
+        self.num_training = int(num_training)
+        self.epsilon = float(epsilon) if self.num_training > 0 else 0.0
+        self.discount = float(gamma)
+        self.alpha = float(alpha) if self.num_training > 0 else 0.0
+        self.episodes_so_far = 0
+
+        # Persistent Q-table saved right next to my_team.py
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.q_file = os.path.join(base_dir, 'q_table.pkl')
+
+        if os.path.exists(self.q_file):
+            with open(self.q_file, 'rb') as f:
+                self.q_values = pickle.load(f)
+        else:
+            self.q_values = util.Counter()
+
+        self.last_game_state = None
+        self.last_state = None
+        self.last_action = None
+        self.cached_game_state = None
+        self.cached_state = None
+
+    def get_legal_actions(self, state):
+        if isinstance(state, tuple):
+            return list(state[1])
+        return state.get_legal_actions(self.index)
+
+    # --- YOUR EXACT LAB 3 METHODS (UNTOUCHED) ---
+
+    def get_q_value(self, state, action):
+        return self.q_values[(state, action)]
+
+    def compute_value_from_q_values(self, state):
+        acciones = self.get_legal_actions(state)
+        if not acciones:
+            return 0.0
+
+        maximu = float('-inf')
+        for a in acciones:
+            q_value = self.get_q_value(state, a)
+            maximu = max(maximu, q_value)
+
+        return maximu
+
+    def compute_action_from_q_values(self, state):
+        acciones = self.get_legal_actions(state)
+        if not acciones:
+            return None
+
+        maximu = float('-inf')
+        move = []
+
+        for a in acciones:
+            q_value = self.get_q_value(state, a)
+            if (maximu == q_value):
+                move.append(a)
+            elif (q_value > maximu):
+                maximu = q_value
+                move = [a]
+
+        return random.choice(move)
+
+    def get_action(self, state):
+        acciones = self.get_legal_actions(state)
+        if not acciones:
+            return None
+
+        flipp = util.flip_coin(self.epsilon)
+        if flipp:
+            action = random.choice(acciones)
+            return action
+
+        return self.compute_action_from_q_values(state)
+
+    def update(self, state, action, next_state, reward):
+        gamma = self.discount
+        q = self.get_q_value(state, action)
+        next_v = self.compute_value_from_q_values(next_state)
+        self.q_values[(state, action)] = (1.0 - self.alpha) * q + self.alpha * (reward + gamma * next_v)
+
+    # --- ENVIRONMENT SENSORS, REWARDS & Q-TABLE PERSISTENCE ---
+
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        self.start = nearest_point(game_state.get_agent_position(self.index))
+        walls = game_state.get_walls()
+        mid_x = walls.width // 2
+        border_x = mid_x - 1 if self.red else mid_x
+        self.home_border = [
+            (border_x, y) for y in range(1, walls.height - 1)
+            if not walls[border_x][y]
+        ]
+
+        self.last_game_state = None
+        self.last_state = None
+        self.last_action = None
+        self.cached_game_state = None
+        self.cached_state = None
+
+    def _next_coords(self, game_state, pos, action):
+        dirs = {
+            Directions.NORTH: (0, 1),
+            Directions.SOUTH: (0, -1),
+            Directions.EAST: (1, 0),
+            Directions.WEST: (-1, 0),
+            Directions.STOP: (0, 0),
+        }
+        dx, dy = dirs[action]
+        nx, ny = int(pos[0] + dx), int(pos[1] + dy)
+        if game_state.has_wall(nx, ny):
+            return (int(pos[0]), int(pos[1]))
+        return (nx, ny)
+
+    def _get_targets(self, game_state):
+        my_state = game_state.get_agent_state(self.index)
+        food_list = self.get_food(game_state).as_list()
+        if my_state.num_carrying >= 3 or len(food_list) <= 2:
+            return self.home_border
+        return food_list
+
+    def get_state(self, game_state):
+        my_state = game_state.get_agent_state(self.index)
+        my_pos = nearest_point(my_state.get_position())
+        goals = self._get_targets(game_state)
+
+        legal = [a for a in game_state.get_legal_actions(self.index) if a != Directions.STOP]
+        if not legal:
+            legal = game_state.get_legal_actions(self.index)
+
+        # 1. Direction toward nearest target (food or home border)
+        food_dir = Directions.STOP
+        if goals and legal:
+            best_dist = 9999
+            for a in legal:
+                next_pos = self._next_coords(game_state, my_pos, a)
+                dist = min(self.get_maze_distance(next_pos, g) for g in goals)
+                if dist < best_dist:
+                    best_dist = dist
+                    food_dir = a
+
+        # 2. Closest active ghost direction & distance bucket
+        closest_ghost_pos = None
+        min_ghost_dist = 9999
+        for i in self.get_opponents(game_state):
+            enemy = game_state.get_agent_state(i)
+            if not enemy.is_pacman and enemy.get_position() is not None and enemy.scared_timer <= 1:
+                g_pos = nearest_point(enemy.get_position())
+                d = self.get_maze_distance(my_pos, g_pos)
+                if d < min_ghost_dist:
+                    min_ghost_dist = d
+                    closest_ghost_pos = g_pos
+
+        if closest_ghost_pos is None or min_ghost_dist > 5:
+            ghost_dir = None
+            ghost_dist_bucket = 'far'
+        else:
+            ghost_dist_bucket = 'danger' if min_ghost_dist <= 2 else 'near'
+            ghost_dir = Directions.STOP
+            best_g_dist = 9999
+            for a in legal:
+                next_pos = self._next_coords(game_state, my_pos, a)
+                d = self.get_maze_distance(next_pos, closest_ghost_pos)
+                if d < best_g_dist:
+                    best_g_dist = d
+                    ghost_dir = a
+
+        # 3. Carrying flag
+        carrying = my_state.num_carrying >= 3
+
+        return AbstractState(((food_dir, ghost_dir, ghost_dist_bucket, carrying), tuple(legal)))
+
+    def get_reward(self, game_state, next_game_state):
+        prev_pos = nearest_point(game_state.get_agent_position(self.index))
+        next_pos = nearest_point(next_game_state.get_agent_position(self.index))
+
+        score_diff = self.get_score(next_game_state) - self.get_score(game_state)
+        food_eaten = len(self.get_food(game_state).as_list()) - len(self.get_food(next_game_state).as_list())
+        reward = score_diff * 100 + food_eaten * 15
+
+        if next_pos == self.start and prev_pos != self.start:
+            return reward - 100
+
+        if score_diff == 0 and food_eaten == 0:
+            targets = self._get_targets(game_state)
+            if targets:
+                prev_dist = min(self.get_maze_distance(prev_pos, t) for t in targets)
+                next_dist = min(self.get_maze_distance(next_pos, t) for t in targets)
+                if next_dist < prev_dist:
+                    reward += 1
+                else:
+                    reward -= 2
+
+        return reward
+
+    def observation_function(self, game_state):
+        next_state = self.get_state(game_state)
+        if self.last_game_state is not None and self.last_action is not None:
+            reward = self.get_reward(self.last_game_state, game_state)
+            self.update(self.last_state, self.last_action, next_state, reward)
+        self.cached_game_state = game_state
+        self.cached_state = next_state
+        return super().observation_function(game_state)
+
+    def choose_action(self, game_state):
+        if self.cached_game_state is game_state and self.cached_state is not None:
+            state = self.cached_state
+        else:
+            state = self.get_state(game_state)
+        action = self.get_action(state)
+        self.last_game_state = game_state
+        self.last_state = state
+        self.last_action = action
+        return action
+
+    def final(self, game_state):
+        if self.last_game_state is not None and self.last_action is not None:
+            reward = self.get_reward(self.last_game_state, game_state)
+            next_state = self.get_state(game_state)
+            self.update(self.last_state, self.last_action, next_state, reward)
+
+        self.episodes_so_far += 1
+
+        # Save Q-table during training and print summary when training completes
+        if self.num_training > 0 and self.episodes_so_far <= self.num_training:
+            with open(self.q_file, 'wb') as f:
+                pickle.dump(self.q_values, f)
+
+            if self.episodes_so_far == self.num_training:
+                print(f"\n=== Q-TABLE SAVED ({len(self.q_values)} entries) -> {self.q_file} ===")
+                by_state = {}
+                for (st, act), val in self.q_values.items():
+                    by_state.setdefault(st[0], []).append((act, round(val, 2)))
+                for st_key, vals in sorted(by_state.items()):
+                    vals.sort(key=lambda x: x[1], reverse=True)
+                    print(f"State {st_key} -> {vals}")
+                print("=========================================\n")
+
+        if self.episodes_so_far >= self.num_training:
+            self.epsilon = 0.0
+            self.alpha = 0.0
+
+        super().final(game_state)
